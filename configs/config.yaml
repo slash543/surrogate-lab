@@ -1,0 +1,61 @@
+data:
+  source: "data/simulations/"
+  file_pattern: "*.csv"
+  time_to_depth:
+    method: linear
+    scale: 1.0          # mm per time unit
+
+features:
+  inputs:
+    - centroid_x
+    - centroid_y
+    - centroid_z
+    - facet_area
+    - insertion_depth
+    # Future: uncomment to activate
+    # - insertion_speed
+    # - material_parameters
+    # - geometry_parameters
+  target: contact_pressure
+  normalization:
+    method: standard    # standard | minmax
+
+split:
+  train: 0.70
+  val:   0.15
+  test:  0.15
+  random_seed: 42
+
+model:
+  type: MLP
+  layers: [128, 128, 64]
+  activation: relu      # relu | tanh | elu | gelu
+  dropout: 0.0
+
+training:
+  optimizer: adam
+  lr: 0.001
+  loss: mse
+  epochs: 200
+  batch_size: 256
+  early_stopping:
+    enabled: true
+    patience: 20
+    min_delta: 1.0e-6
+  checkpoint:
+    enabled: true
+    dir: checkpoints/
+    save_best: true
+
+evaluation:
+  metrics: [rmse, mae, r2]
+  kfold:
+    enabled: false
+    n_splits: 5
+
+mlflow:
+  experiment_name: surrogate-lab
+  tracking_uri: mlruns/
+  log_artifacts: true
+  register_model: false
+  model_name: contact_pressure_surrogate
