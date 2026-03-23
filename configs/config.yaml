@@ -6,16 +6,27 @@ data:
     scale: 1.0          # mm per time unit
 
 features:
+  # HOW TO ADD A NEW VARIABLE
+  # --------------------------
+  # 1. In xplt-parser/xplt_core.py add a _col_<name>(self) method to
+  #    SimulationCase that returns a flat array of length n_timesteps*n_facets.
+  # 2. Register it in SimulationCase.SURROGATE_COLUMNS with a short description.
+  # 3. Re-export the surrogate CSV from the notebook (cell 17) — the new column
+  #    appears automatically.
+  # 4. Add the column name here (inputs or target) and re-run training.
+  #
+  # To discover what columns a CSV already contains:
+  #   from src.data.loader import list_available_features
+  #   print(list_available_features("path/to/sample_surrogate.csv"))
   inputs:
     - centroid_x
     - centroid_y
     - centroid_z
     - facet_area
     - insertion_depth
-    # Future: uncomment to activate
-    # - insertion_speed
-    # - material_parameters
-    # - geometry_parameters
+    # Add new xplt-parser columns here, e.g.:
+    # - vector_gap_magnitude
+    # - surface_traction_z
   target: contact_pressure
   normalization:
     method: standard    # standard | minmax

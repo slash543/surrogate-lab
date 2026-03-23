@@ -16,3 +16,4 @@ surrogatelab.egg-info/
 *.feb
 *.xplt
 CLAUDE.md
+.claude/

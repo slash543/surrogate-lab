@@ -1,6 +1,13 @@
 # SurrogateLab
 
-A modular, open-source ML pipeline for building surrogate models of mechanical finite element simulations. Predicts **contact pressure fields** from FEBio `.xplt` simulation outputs using a config-driven MLP with full MLflow experiment tracking.
+A modular, open-source ML pipeline for building surrogate models of mechanical
+finite element simulations. Predicts **contact pressure fields** from FEBio
+`.xplt` simulation outputs using a config-driven MLP with full MLflow
+experiment tracking.
+
+Training data is produced by [xplt-parser](../xplt-parser/), which parses the
+raw simulation files and exports a ready-to-use CSV. The two repositories are
+designed to work together but are independently usable.
 
 ---
 
@@ -12,32 +19,40 @@ A modular, open-source ML pipeline for building surrogate models of mechanical f
   - [Installation](#installation)
   - [Prepare Your Data](#prepare-your-data)
 - [Quick Start](#quick-start)
-- [Tutorial: Train Your First Surrogate Model](#tutorial-train-your-first-surrogate-model)
-  - [Step 1: Configure the pipeline](#step-1-configure-the-pipeline)
-  - [Step 2: Load and explore data](#step-2-load-and-explore-data)
-  - [Step 3: Engineer features and split data](#step-3-engineer-features-and-split-data)
-  - [Step 4: Build and train the model](#step-4-build-and-train-the-model)
-  - [Step 5: Evaluate and visualize results](#step-5-evaluate-and-visualize-results)
-  - [Step 6: Inspect with MLflow](#step-6-inspect-with-mlflow)
+- [Full Pipeline Walkthrough](#full-pipeline-walkthrough)
+  - [Step 1: Configure](#step-1-configure)
+  - [Step 2: Load and inspect data](#step-2-load-and-inspect-data)
+  - [Step 3: Engineer features and split](#step-3-engineer-features-and-split)
+  - [Step 4: Build and train](#step-4-build-and-train)
+  - [Step 5: Evaluate and visualise](#step-5-evaluate-and-visualise)
+  - [Step 6: View results in MLflow](#step-6-view-results-in-mlflow)
 - [Project Structure](#project-structure)
 - [Configuration Reference](#configuration-reference)
 - [Extending the Pipeline](#extending-the-pipeline)
+  - [Add a new input variable](#add-a-new-input-variable)
+  - [Change the prediction target](#change-the-prediction-target)
+  - [Add a custom model](#add-a-custom-model)
+  - [Add a new evaluation metric](#add-a-new-evaluation-metric)
+- [Discover Available Features](#discover-available-features)
 - [Running Tests](#running-tests)
+- [CLI Reference](#cli-reference)
 - [License](#license)
 
 ---
 
 ## Overview
 
-SurrogateLab replaces expensive FEBio finite element solves with a fast neural network. Given per-facet geometry and an insertion depth, the model predicts the contact pressure at each facet — turning a multi-minute simulation into a millisecond inference.
-
-**Key properties:**
+SurrogateLab replaces expensive FEBio finite element solves with a fast neural
+network. Given per-facet geometry and the catheter insertion depth at a given
+timestep, the model predicts the contact pressure at each facet — turning a
+multi-minute simulation into a millisecond inference.
 
 | Property | Detail |
 |---|---|
-| Input | Per-facet centroid (x, y, z), facet area, insertion depth |
-| Output | Contact pressure (scalar per facet) |
-| Model | Configurable MLP (depth, width, activation) |
+| Inputs | `centroid_x/y/z`, `facet_area`, `insertion_depth` |
+| Output | `contact_pressure` (scalar per facet) |
+| Model | Configurable MLP (depth, width, activation, dropout) |
+| Data source | xplt-parser `df_surrogate()` CSV |
 | Tracking | MLflow — params, metrics, artifacts, model registry |
 | Deployment | CLI script compatible with Azure ML |
 | Licenses | Apache 2.0 / BSD / MIT only — commercial-use safe |
@@ -51,6 +66,8 @@ SurrogateLab replaces expensive FEBio finite element solves with a fast neural n
 - Python 3.10+
 - `make` (optional but recommended)
 - A CUDA-capable GPU (optional — falls back to CPU automatically)
+- [xplt-parser](../xplt-parser/) to generate training CSVs from `.feb`/`.xplt`
+  files
 
 ### Installation
 
@@ -64,7 +81,7 @@ make env
 
 # Or manually:
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
@@ -77,32 +94,50 @@ make env-full
 
 ### Prepare Your Data
 
-Data must come from the `../xplt-parser/` pipeline. Each simulation produces one CSV file with the following columns:
+Training data comes from [xplt-parser](../xplt-parser/). Each simulation is
+exported as a single CSV using `SimulationCase.df_surrogate()` in the parser.
 
-| Column | Type | Description |
-|---|---|---|
-| `facet_id` | int | Facet identifier |
-| `centroid_x` | float | Facet centroid X coordinate |
-| `centroid_y` | float | Facet centroid Y coordinate |
-| `centroid_z` | float | Facet centroid Z coordinate |
-| `facet_area` | float | Surface area of the facet |
-| `contact_pressure` | float | Target: contact pressure at this facet |
-| `time_step` | float | Simulation time step (auto-converted to insertion depth) |
+**Generating the CSV from xplt-parser:**
 
-Place your CSV files in `data/simulations/`:
+```python
+# In xplt-parser/xplt_explorer.ipynb (cell 17) or your own script:
+import xplt_core as xc
 
-```bash
-cp /path/to/your/sim_*.csv data/simulations/
+case = xc.SimulationCase("my_sim.feb", "my_sim.xplt", label="sim_01")
+df = case.df_surrogate()
+df.to_csv("sim_01_surrogate.csv", index=False)
 ```
 
-> **Note:** If your CSV already has an `insertion_depth` column, the time-step conversion is skipped automatically.
+`insertion_depth` is computed automatically from the prescribed displacement
+boundary conditions in the `.feb` file — no manual configuration needed.
+Changing the `.feb` and re-exporting will always produce correct depths.
+
+**CSV schema — one row per (facet × timestep):**
+
+| Column | Type | Units | Description |
+|---|---|---|---|
+| `centroid_x` | float | mm | Facet centroid X coordinate |
+| `centroid_y` | float | mm | Facet centroid Y coordinate |
+| `centroid_z` | float | mm | Facet centroid Z coordinate |
+| `facet_area` | float | mm² | Facet surface area |
+| `insertion_depth` | float | mm | Catheter insertion depth at this timestep |
+| `contact_pressure` | float | MPa | Contact pressure (the prediction target) |
+
+**Place CSV files in `data/simulations/`:**
+
+```bash
+cp /path/to/sim_*_surrogate.csv data/simulations/
+```
+
+The pipeline will load and concatenate all files matching
+`config.yaml → data.file_pattern` (default `*.csv`) automatically.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Activate your environment
+# Activate environment
 source .venv/bin/activate
 
 # Train with default config
@@ -116,21 +151,19 @@ make mlflow
 
 ---
 
-## Tutorial: Train Your First Surrogate Model
+## Full Pipeline Walkthrough
 
-This tutorial walks through the full pipeline end-to-end using the Python API directly. The same steps are available interactively in `notebooks/training.ipynb`.
+The same steps are available interactively in `notebooks/training.ipynb`.
 
-### Step 1: Configure the pipeline
+### Step 1: Configure
 
-Everything is controlled by `configs/config.yaml`. Open it and verify the paths and hyperparameters:
+Everything is controlled by `configs/config.yaml`. Verify the paths and
+hyperparameters before training:
 
 ```yaml
 data:
   source: "data/simulations/"
   file_pattern: "*.csv"
-  time_to_depth:
-    method: linear
-    scale: 1.0            # 1 mm per time unit — adjust to your simulation
 
 features:
   inputs:
@@ -145,12 +178,11 @@ features:
 
 model:
   type: MLP
-  layers: [128, 128, 64]  # Hidden layer widths
+  layers: [128, 128, 64]
   activation: relu
   dropout: 0.0
 
 training:
-  optimizer: adam
   lr: 0.001
   epochs: 200
   batch_size: 256
@@ -163,9 +195,9 @@ mlflow:
   tracking_uri: mlruns/
 ```
 
-No changes to Python code are needed — the pipeline reads this file at runtime.
+No Python code changes are needed — the pipeline reads this file at runtime.
 
-### Step 2: Load and explore data
+### Step 2: Load and inspect data
 
 ```python
 from src.utils.config import load_config
@@ -173,27 +205,16 @@ from src.data.loader import load_simulation_data
 
 cfg = load_config("configs/config.yaml")
 
-# Loads all CSVs in data/simulations/, converts time_step → insertion_depth,
-# validates that all required columns are present, returns a single DataFrame
+# Loads all CSVs from data/simulations/, validates required columns,
+# returns a single concatenated DataFrame.
 df = load_simulation_data(cfg)
 
-print(df.shape)          # (n_facets × n_timesteps, n_columns)
+print(df.shape)          # (n_facets × n_timesteps × n_simulations, 6)
 print(df.describe())
 print(df["contact_pressure"].describe())
 ```
 
-Example output:
-```
-(48000, 8)
-       facet_id  centroid_x  ...  contact_pressure
-count   48000.0     48000.0  ...           48000.0
-mean      150.0       0.023  ...               1.4
-std        86.6       2.841  ...               3.2
-min         1.0      -8.120  ...               0.0
-max       300.0       9.440  ...              18.6
-```
-
-### Step 3: Engineer features and split data
+### Step 3: Engineer features and split
 
 ```python
 from src.features.engineer import FeaturePipeline, build_xy
@@ -201,12 +222,11 @@ from src.features.splitter import split_data
 
 # Extract feature matrix X and target vector y
 X, y = build_xy(df, cfg)
-print(f"X shape: {X.shape}")   # (48000, 5)
-print(f"y shape: {y.shape}")   # (48000,)
+print(f"X shape: {X.shape}")   # (n_rows, 5)
+print(f"y shape: {y.shape}")   # (n_rows,)
 
-# Split into train / val / test (70 / 15 / 15)
+# 70 / 15 / 15 train / val / test split
 X_train, X_val, X_test, y_train, y_val, y_test = split_data(X, y, cfg)
-print(f"Train: {X_train.shape[0]}  Val: {X_val.shape[0]}  Test: {X_test.shape[0]}")
 
 # Fit scalers on training data only (prevents data leakage)
 pipeline = FeaturePipeline(cfg)
@@ -214,11 +234,11 @@ X_train_s, y_train_s = pipeline.fit_transform(X_train, y_train)
 X_val_s,   y_val_s   = pipeline.transform(X_val,   y_val)
 X_test_s,  y_test_s  = pipeline.transform(X_test,  y_test)
 
-# Save scalers for later inference
+# Save scalers for inference
 pipeline.save("artifacts/scalers/")
 ```
 
-### Step 4: Build and train the model
+### Step 4: Build and train
 
 ```python
 import torch
@@ -226,66 +246,42 @@ from src.models.factory import build_model
 from src.training.trainer import train
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Training on: {device}")
 
-# Build MLP from config (input_dim inferred from feature count)
+# Input dimension is inferred from X_train_s automatically
 model = build_model(input_dim=X_train_s.shape[1], cfg=cfg)
-print(model)
-# MLP(
-#   (layers): Sequential(
-#     (0): Linear(5, 128)  (1): ReLU()
-#     (2): Linear(128, 128) (3): ReLU()
-#     (4): Linear(128, 64)  (5): ReLU()
-#     (6): Linear(64, 1)
-#   )
-# )
 
-# Train with early stopping and MLflow logging
 model = train(
     model, X_train_s, y_train_s,
     X_val_s, y_val_s,
     cfg=cfg,
-    run_name="tutorial-run-01"
+    run_name="my-first-run",
 )
 ```
 
 Training output:
+
 ```
 Epoch  10/200  train_loss=0.04821  val_loss=0.04612
 Epoch  20/200  train_loss=0.02934  val_loss=0.02801
 ...
-Epoch  87/200  train_loss=0.00312  val_loss=0.00298
 Early stopping triggered (patience=20 exceeded).
 Restored best model from checkpoints/best_model.pt (val_loss=0.00282)
 ```
 
-### Step 5: Evaluate and visualize results
+### Step 5: Evaluate and visualise
 
 ```python
 from src.evaluation.metrics import evaluate_model
-from src.evaluation.visualization import (
-    plot_predicted_vs_actual,
-    plot_residuals,
-    plot_training_curves,
-)
+from src.evaluation.visualization import plot_predicted_vs_actual, plot_residuals
 
-# Compute RMSE, MAE, R² in original (physical) units
+# Metrics in original physical units (inverse-scaled)
 metrics = evaluate_model(model, X_test_s, y_test_s, pipeline, device)
-print(f"RMSE: {metrics['rmse']:.4f}")
-print(f"MAE:  {metrics['mae']:.4f}")
-print(f"R²:   {metrics['r2']:.4f}")
-```
+print(f"RMSE : {metrics['rmse']:.4f} MPa")
+print(f"MAE  : {metrics['mae']:.4f} MPa")
+print(f"R²   : {metrics['r2']:.4f}")
 
-Example output:
-```
-RMSE: 0.2134
-MAE:  0.1401
-R²:   0.9821
-```
-
-```python
-# Get raw predictions for plotting
-import numpy as np
+# Diagnostic plots
+import torch, numpy as np
 model.eval()
 with torch.no_grad():
     y_pred_s = model(torch.tensor(X_test_s).to(device)).cpu().numpy()
@@ -297,35 +293,35 @@ plot_predicted_vs_actual(y_true, y_pred, save_path="artifacts/pred_vs_actual.png
 plot_residuals(y_true, y_pred, save_path="artifacts/residuals.png")
 ```
 
-This produces two diagnostic plots:
+Two diagnostic plots are produced:
 
-- **Predicted vs Actual** — scatter plot along the ideal diagonal; spread indicates error
-- **Residuals** — residuals vs predicted values + histogram; ideally centered at zero
+- **Predicted vs Actual** — scatter along the ideal diagonal; spread = error
+- **Residuals** — residuals vs predicted + histogram; ideally centred at zero
 
-### Step 6: Inspect with MLflow
+### Step 6: View results in MLflow
 
 ```bash
 make mlflow
 # or: mlflow ui --backend-store-uri mlruns/
 ```
 
-Open [http://localhost:5000](http://localhost:5000) in your browser. You'll see:
+Open [http://localhost:5000](http://localhost:5000). You will see:
 
-- **Parameters**: model architecture, learning rate, batch size, optimizer, normalization method
-- **Metrics**: `train_loss` and `val_loss` per epoch, final `rmse`, `mae`, `r2` on test set
-- **Artifacts**: best model checkpoint, prediction plots, scaler files
-- **Runs**: compare experiments side-by-side (e.g., different layer configs, activations)
+- **Parameters**: model architecture, learning rate, batch size, normalization
+- **Metrics**: `train_loss` and `val_loss` per epoch; final RMSE, MAE, R² on test set
+- **Artifacts**: best model checkpoint, diagnostic plots, scaler files
+- **Runs**: compare experiments side-by-side
 
-To promote a model to the registry:
+To register a model after training:
 
 ```yaml
-# config.yaml
+# configs/config.yaml
 mlflow:
   register_model: true
   model_name: contact_pressure_surrogate
 ```
 
-Then use the MLflow UI to transition from `Staging` to `Production`.
+Promote from `Staging` to `Production` in the MLflow UI.
 
 ---
 
@@ -338,16 +334,16 @@ surrogate-lab/
 │
 ├── src/
 │   ├── data/
-│   │   ├── loader.py        # load_simulation_data(): CSV → DataFrame
-│   │   └── schema.py        # Column validation
+│   │   ├── loader.py        # load_simulation_data(), list_available_features()
+│   │   └── schema.py        # Column validation against config
 │   ├── features/
 │   │   ├── engineer.py      # FeaturePipeline, build_xy()
 │   │   └── splitter.py      # split_data()
 │   ├── models/
-│   │   ├── mlp.py           # MLP(nn.Module)
+│   │   ├── mlp.py           # MLP(nn.Module) — configurable depth and width
 │   │   └── factory.py       # build_model(), register_model()
 │   ├── training/
-│   │   └── trainer.py       # train(), EarlyStopping
+│   │   └── trainer.py       # train(), EarlyStopping, MLflow logging
 │   ├── evaluation/
 │   │   ├── metrics.py       # compute_metrics(), evaluate_model()
 │   │   └── visualization.py # Prediction and residual plots
@@ -359,10 +355,10 @@ surrogate-lab/
 │   └── train.py             # CLI training entrypoint
 │
 ├── notebooks/
-│   └── training.ipynb       # Interactive walkthrough of full pipeline
+│   └── training.ipynb       # Interactive walkthrough of the full pipeline
 │
 ├── tests/                   # pytest test suite
-├── data/simulations/        # Place your CSV files here
+├── data/simulations/        # Place surrogate CSVs from xplt-parser here
 ├── artifacts/               # Scalers, plots (auto-created)
 ├── checkpoints/             # Best model weights (auto-created)
 ├── mlruns/                  # MLflow tracking (auto-created)
@@ -374,38 +370,38 @@ surrogate-lab/
 
 ## Configuration Reference
 
-All pipeline behaviour is controlled by `configs/config.yaml`:
-
 ```yaml
 data:
-  source: "data/simulations/"   # Directory containing CSV files
+  source: "data/simulations/"   # Directory containing surrogate CSV files
   file_pattern: "*.csv"         # Glob pattern to select files
-  time_to_depth:
-    method: linear              # Conversion method for time_step → insertion_depth
-    scale: 1.0                  # Multiplier (e.g., 1.0 mm per time unit)
+  time_to_depth:                # Fallback only — used if a CSV has a
+    method: linear              # 'time_step' column but no 'insertion_depth'.
+    scale: 1.0                  # CSVs from xplt-parser already contain
+                                # 'insertion_depth', so this section is skipped.
 
 features:
-  inputs:                       # Add/remove feature names here only
-    - centroid_x
+  # HOW TO ADD A NEW VARIABLE — see "Extending the Pipeline" below.
+  inputs:                       # Column names to use as model inputs.
+    - centroid_x                # Add/remove names here; no code changes needed.
     - centroid_y
     - centroid_z
     - facet_area
     - insertion_depth
-  target: contact_pressure      # Change to 'force', 'stress', etc. for other targets
+  target: contact_pressure      # Column to predict. Change for other targets.
   normalization:
     method: standard            # 'standard' (z-score) or 'minmax' (0–1)
 
 split:
   train: 0.70
-  val: 0.15
-  test: 0.15
+  val:   0.15
+  test:  0.15
   random_seed: 42
 
 model:
-  type: MLP                     # Change to a registered custom model type
-  layers: [128, 128, 64]        # Hidden layer widths (any depth)
+  type: MLP                     # Must match a registered model type
+  layers: [128, 128, 64]        # Hidden layer widths — any depth supported
   activation: relu              # relu | tanh | elu | gelu
-  dropout: 0.0                  # Dropout probability (0.0 = disabled)
+  dropout: 0.0                  # 0.0 = disabled
 
 training:
   optimizer: adam
@@ -440,17 +436,46 @@ mlflow:
 
 ## Extending the Pipeline
 
-### Add a new input feature
+### Add a new input variable
 
-1. Ensure your CSV has the new column (e.g., `insertion_speed`)
-2. Add it to `config.yaml`:
+Adding a variable requires changes in **both** repositories. The steps are:
+
+**In xplt-parser (`xplt_core.py`):**
+
+1. Add a `_col_<name>(self)` method to `SimulationCase` that returns a 1-D
+   NumPy array of length `n_timesteps × n_facets`.
+2. Register it in `SimulationCase.SURROGATE_COLUMNS`:
+   ```python
+   SURROGATE_COLUMNS = {
+       ...
+       'my_new_var': ('Description [units]', '_col_my_new_var'),
+   }
+   ```
+3. Re-run `df_surrogate()` and save the CSV — the new column appears
+   automatically.
+
+**In surrogate-lab (`configs/config.yaml`):**
+
+4. Add the column name to `features.inputs`:
    ```yaml
    features:
      inputs:
        - ...
-       - insertion_speed   # new
+       - my_new_var   # ← new
    ```
-3. Re-run training. No code changes required.
+
+No other code changes are required. The schema validator, feature extractor,
+normaliser, and model all adapt to the new input count automatically.
+
+To check what columns a CSV already exposes before editing `config.yaml`:
+
+```python
+from src.data.loader import list_available_features
+info = list_available_features("data/simulations/sim_01_surrogate.csv")
+print("All columns     :", info["all_columns"])
+print("Suggested inputs:", info["suggested_inputs"])
+print("Suggested target:", info["suggested_target"])
+```
 
 ### Change the prediction target
 
@@ -459,7 +484,7 @@ features:
   target: von_mises_stress   # was: contact_pressure
 ```
 
-Ensure that column exists in your CSV. The pipeline adapts automatically.
+Ensure the column exists in your CSV. The pipeline adapts automatically.
 
 ### Add a custom model
 
@@ -468,12 +493,13 @@ Ensure that column exists in your CSV. The pipeline adapts automatically.
 import torch.nn as nn
 
 class MyModel(nn.Module):
-    def __init__(self, input_dim, cfg):
+    def __init__(self, input_dim: int, cfg: dict):
         super().__init__()
-        # ... define layers using cfg['model'] params
+        # define layers using cfg['model'] params
 
     def forward(self, x):
-        # ... return shape (batch,)
+        # return shape (batch,) for scalar regression
+        ...
 ```
 
 Register it before training:
@@ -494,21 +520,43 @@ model:
 
 ### Add a new evaluation metric
 
-Add your function to `src/evaluation/metrics.py`:
+Add your function to `src/evaluation/metrics.py` and call it from
+`compute_metrics()`:
 
 ```python
-def mean_relative_error(y_true, y_pred):
+def mean_relative_error(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.mean(np.abs((y_true - y_pred) / (y_true + 1e-8))))
 ```
 
-Then call it in `compute_metrics()`.
+---
+
+## Discover Available Features
+
+Use `list_available_features()` to inspect what columns a surrogate CSV
+contains before editing `config.yaml`:
+
+```python
+from src.data.loader import list_available_features
+
+info = list_available_features("data/simulations/sim_01_surrogate.csv")
+# Returns:
+# {
+#   "all_columns":      ["centroid_x", "centroid_y", ...],
+#   "suggested_inputs": ["centroid_x", "centroid_y", "centroid_z",
+#                        "facet_area", "insertion_depth"],
+#   "suggested_target": ["contact_pressure"],
+# }
+```
+
+The function reads only the CSV header (no data loaded) so it is fast even
+for large files.
 
 ---
 
 ## Running Tests
 
 ```bash
-# Run full test suite
+# Full test suite
 make test
 
 # Verbose output
@@ -532,11 +580,11 @@ python scripts/train.py
 # Override config file
 python scripts/train.py --config experiments/high_lr.yaml
 
-# Override data source (single file or directory)
-python scripts/train.py --data data/simulations/sim_01.csv
+# Point to a specific CSV or directory
+python scripts/train.py --data data/simulations/sim_01_surrogate.csv
 
 # Tag the MLflow run
-python scripts/train.py --run-name ablation-no-dropout
+python scripts/train.py --run-name ablation-dropout-0.1
 ```
 
 ### Makefile shortcuts
@@ -547,7 +595,7 @@ python scripts/train.py --run-name ablation-no-dropout
 | `make env-dev` | + pytest and pytest-cov |
 | `make env-full` | + jupyter and ipykernel |
 | `make train` | Run `scripts/train.py` with default config |
-| `make test` | Run pytest |
+| `make test` | Run the pytest suite |
 | `make mlflow` | Launch MLflow UI at localhost:5000 |
 | `make clean` | Remove `.venv`, checkpoints, artifacts, mlruns |
 
@@ -555,4 +603,5 @@ python scripts/train.py --run-name ablation-no-dropout
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE). All dependencies use MIT, BSD, or Apache 2.0 licenses. Safe for commercial use and resale.
+Apache 2.0 — see [LICENSE](LICENSE). All dependencies use MIT, BSD, or
+Apache 2.0 licenses. Safe for commercial use and resale.

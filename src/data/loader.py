@@ -32,6 +32,42 @@ def _add_insertion_depth(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     return df
 
 
+def list_available_features(path: str) -> dict[str, list[str]]:
+    """Inspect a surrogate CSV and report which columns are available.
+
+    Useful when xplt-parser adds new variables and you want to know which
+    column names can be added to configs/config.yaml.
+
+    Args:
+        path: Path to a surrogate CSV file (e.g. ``sample_surrogate.csv``).
+
+    Returns:
+        A dict with keys ``'all_columns'``, ``'suggested_inputs'``, and
+        ``'suggested_target'`` based on the conventional naming used by
+        xplt-parser.  Columns ending in ``_pressure`` or ``_force`` are
+        treated as candidate targets; everything else as inputs.
+
+    Example::
+
+        from src.data.loader import list_available_features
+        info = list_available_features("path/to/sample_surrogate.csv")
+        print("Add to config.yaml inputs:", info["suggested_inputs"])
+    """
+    df = pd.read_csv(path, nrows=0)   # header only — no data read
+    cols = list(df.columns)
+
+    target_hints = {"pressure", "force", "stress", "strain", "traction"}
+    suggested_targets = [c for c in cols if any(h in c.lower() for h in target_hints)]
+    suggested_inputs  = [c for c in cols if c not in suggested_targets]
+
+    log.info("Available columns in %s: %s", Path(path).name, cols)
+    return {
+        "all_columns":       cols,
+        "suggested_inputs":  suggested_inputs,
+        "suggested_target":  suggested_targets,
+    }
+
+
 def load_simulation_data(
     cfg: dict,
     path: str | None = None,
