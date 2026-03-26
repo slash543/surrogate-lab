@@ -66,7 +66,7 @@ evaluation:
 
 mlflow:
   experiment_name: surrogate-lab
-  tracking_uri: /workspace/mlruns
+  tracking_uri: mlruns/
   log_artifacts: true
   register_model: false
   model_name: contact_pressure_surrogate
